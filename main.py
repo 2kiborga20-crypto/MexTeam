@@ -11,11 +11,11 @@ from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 )
 
-BOT_TOKEN = "8805214954:AAEqTg1qjSyoKvSmkFQquzXqjzF3dSok3Tw"
+BOT_TOKEN = "8805214954:AAHEkkq4TEAuu457JtNq1eO0CE9cw0gqxk0"
 if not BOT_TOKEN:
     raise RuntimeError("Укажите BOT_TOKEN")
 
-ADMIN_ID = 7891556528  # ЗАМЕНИ на свой ID из шага 2
+ADMIN_ID = 7891556528  # <- ваш ID (тот, что приходил в уведомлении)
 
 conn = sqlite3.connect("bot.db", check_same_thread=False)
 conn.row_factory = sqlite3.Row
@@ -36,6 +36,7 @@ def init_db():
         fio TEXT,
         phone TEXT,
         bank TEXT,
+        status TEXT DEFAULT 'new',
         created_at TEXT
     );
     CREATE TABLE IF NOT EXISTS withdrawals (
@@ -44,10 +45,19 @@ def init_db():
         amount TEXT,
         payout_type TEXT,
         payout_value TEXT,
+        status TEXT DEFAULT 'new',
         created_at TEXT
     );
     """)
     conn.commit()
+
+    # добавляем колонку status, если БД уже была создана ранее
+    for table in ("referrals", "withdrawals"):
+        try:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN status TEXT DEFAULT 'new'")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
 
 
 class ReferralForm(StatesGroup):
@@ -94,6 +104,21 @@ def back_kb():
     ])
 
 
+def decision_kb(kind, item_id, worker_id):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="✅ Подтвердить",
+                callback_data=f"ok:{kind}:{item_id}:{worker_id}"
+            ),
+            InlineKeyboardButton(
+                text="❌ Отказать",
+                callback_data=f"no:{kind}:{item_id}:{worker_id}"
+            ),
+        ]
+    ])
+
+
 def get_user(tg_id):
     return cur.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,)).fetchone()
 
@@ -104,13 +129,6 @@ def requisites(row):
     if row["payout_type"] == "sbp":
         return f"📱 СБП\n└ {row['payout_value']}"
     return f"🪙 CryptoBot\n└ {row['payout_value']}"
-
-
-async def notify_admin(text):
-    try:
-        await bot.send_message(ADMIN_ID, text)
-    except Exception:
-        pass
 
 
 bot = Bot(token=BOT_TOKEN)
@@ -214,12 +232,16 @@ async def ref_bank(message: Message, state: FSMContext):
         f"Статус: на проверке",
         reply_markup=back_kb()
     )
-    await notify_admin(
+
+    # уведомление админу с кнопками
+    await bot.send_message(
+        ADMIN_ID,
         f"📥 Новая заявка #{rid}\n\n"
         f"👤 {data['fio']}\n"
         f"📱 {data['phone']}\n"
         f"🏦 {bank or '—'}\n"
-        f"👨‍💼 {message.from_user.full_name} (id: {message.from_user.id})"
+        f"👨‍💼 {message.from_user.full_name} (id: {message.from_user.id})",
+        reply_markup=decision_kb("ref", rid, message.from_user.id)
     )
 
 
@@ -342,10 +364,13 @@ async def withdraw_amount(message: Message, state: FSMContext):
         f"Статус: на обработке",
         reply_markup=back_kb()
     )
-    await notify_admin(
+
+    await bot.send_message(
+        ADMIN_ID,
         f"💸 Заявка на вывод #{wid}\n\n"
         f"👨‍💼 {message.from_user.full_name} (id: {message.from_user.id})\n"
-        f"💵 Сумма: {amount}\n{requisites(user)}"
+        f"💵 Сумма: {amount}\n{requisites(user)}",
+        reply_markup=decision_kb("wd", wid, message.from_user.id)
     )
 
 
@@ -364,13 +389,19 @@ async def my_requests(call: CallbackQuery, state: FSMContext):
         (uid,)
     ).fetchall()
 
+    status_names = {
+        "new": "🕓 на проверке",
+        "approved": "✅ одобрена",
+        "rejected": "❌ отклонена",
+    }
+
     parts = ["📋 Мои заявки\n━━━━━━━━━━━━━━━\n", "Клиенты:"]
     if refs:
         for r in refs:
             parts.append(
                 f"#{r['id']} • {r['fio']}\n"
                 f"└ 📱 {r['phone']} • 🏦 {r['bank'] or '—'}\n"
-                f"└ 🕓 {r['created_at']}"
+                f"└ {status_names.get(r['status'], '🕓 на проверке')}"
             )
     else:
         parts.append("пока нет")
@@ -381,13 +412,72 @@ async def my_requests(call: CallbackQuery, state: FSMContext):
             parts.append(
                 f"#{w['id']} • 💵 {w['amount']}\n"
                 f"└ {w['payout_type'].upper()} • {w['payout_value']}\n"
-                f"└ 🕓 {w['created_at']}"
+                f"└ {status_names.get(w['status'], '🕓 на проверке')}"
             )
     else:
         parts.append("пока нет")
 
     await call.message.edit_text("\n".join(parts), reply_markup=back_kb())
     await call.answer()
+
+
+# --- Решение админа по заявке ---
+
+@dp.callback_query(F.data.startswith(("ok:", "no:")))
+async def admin_decision(call: CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        return await call.answer("Нет доступа", show_alert=True)
+
+    action, kind, item_id, worker_id = call.data.split(":")
+    item_id = int(item_id)
+    worker_id = int(worker_id)
+    approved = action == "ok"
+
+    table = "referrals" if kind == "ref" else "withdrawals"
+    status = "approved" if approved else "rejected"
+
+    cur.execute(f"UPDATE {table} SET status = ? WHERE id = ?", (status, item_id))
+    conn.commit()
+
+    # уведомляем сотрудника
+    if kind == "ref":
+        if approved:
+            worker_text = (
+                f"✅ Заявка #{item_id} одобрена!\n\n"
+                f"Клиент принят в работу. Спасибо!"
+            )
+        else:
+            worker_text = (
+                f"❌ Заявка #{item_id} отклонена.\n\n"
+                f"Если считаете это ошибкой — свяжитесь с администратором."
+            )
+    else:
+        if approved:
+            worker_text = (
+                f"✅ Заявка на вывод #{item_id} одобрена!\n\n"
+                f"Выплата будет произведена в ближайшее время."
+            )
+        else:
+            worker_text = (
+                f"❌ Заявка на вывод #{item_id} отклонена.\n\n"
+                f"Свяжитесь с администратором для уточнения."
+            )
+
+    try:
+        await bot.send_message(worker_id, worker_text)
+    except Exception:
+        pass
+
+    # обновляем сообщение у админа — убираем кнопки, добавляем статус
+    new_text = (call.message.html_text or call.message.text) + (
+        "\n\n✅ <b>ОДОБРЕНО</b>" if approved else "\n\n❌ <b>ОТКЛОНЕНО</b>"
+    )
+    try:
+        await call.message.edit_text(new_text, reply_markup=None, parse_mode="HTML")
+    except Exception:
+        await call.message.edit_reply_markup(reply_markup=None)
+
+    await call.answer("Готово")
 
 
 async def main():
