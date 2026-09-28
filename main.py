@@ -11,7 +11,7 @@ from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 )
 
-BOT_TOKEN = 8805214954:AAEqTg1qjSyoKvSmkFQquzXqjzF3dSok3Tw
+BOT_TOKEN = "8805214954:AAEqTg1qjSyoKvSmkFQquzXqjzF3dSok3Tw"
 if not BOT_TOKEN:
     raise RuntimeError("Укажите BOT_TOKEN")
 
