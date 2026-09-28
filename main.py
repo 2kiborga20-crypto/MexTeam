@@ -15,7 +15,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Укажите BOT_TOKEN")
 
-ADMIN_ID = 123456789  # ЗАМЕНИ на свой ID из шага 2
+ADMIN_ID = 7891556528  # ЗАМЕНИ на свой ID из шага 2
 
 conn = sqlite3.connect("bot.db", check_same_thread=False)
 conn.row_factory = sqlite3.Row
