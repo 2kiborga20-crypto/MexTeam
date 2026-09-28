@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import sqlite3
 from datetime import datetime
 
@@ -15,7 +16,8 @@ BOT_TOKEN = "8805214954:AAHEkkq4TEAuu457JtNq1eO0CE9cw0gqxk0"
 if not BOT_TOKEN:
     raise RuntimeError("Укажите BOT_TOKEN")
 
-ADMIN_ID = 7891556528  # <- ваш ID (тот, что приходил в уведомлении)
+ADMIN_ID = 7891556528  # ваш ID
+REWARD = 700           # сколько рублей за одну одобренную заявку
 
 conn = sqlite3.connect("bot.db", check_same_thread=False)
 conn.row_factory = sqlite3.Row
@@ -27,6 +29,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS users (
         tg_id INTEGER PRIMARY KEY,
         name TEXT,
+        username TEXT,
         payout_type TEXT,
         payout_value TEXT
     );
@@ -43,6 +46,7 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         worker_id INTEGER,
         amount TEXT,
+        amount_num INTEGER DEFAULT 0,
         payout_type TEXT,
         payout_value TEXT,
         status TEXT DEFAULT 'new',
@@ -51,10 +55,13 @@ def init_db():
     """)
     conn.commit()
 
-    # добавляем колонку status, если БД уже была создана ранее
-    for table in ("referrals", "withdrawals"):
+    # добавляем колонки для старых баз
+    for stmt in (
+        "ALTER TABLE users ADD COLUMN username TEXT",
+        "ALTER TABLE withdrawals ADD COLUMN amount_num INTEGER DEFAULT 0",
+    ):
         try:
-            cur.execute(f"ALTER TABLE {table} ADD COLUMN status TEXT DEFAULT 'new'")
+            cur.execute(stmt)
             conn.commit()
         except sqlite3.OperationalError:
             pass
@@ -79,7 +86,8 @@ def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📝 Подать заявку", callback_data="new_referral")],
         [InlineKeyboardButton(text="💰 Заявка на вывод", callback_data="withdraw")],
-        [InlineKeyboardButton(text="💳 Мои реквизиты", callback_data="payout_info")],
+        [InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
+         InlineKeyboardButton(text="💳 Реквизиты", callback_data="payout_info")],
         [InlineKeyboardButton(text="📋 Мои заявки", callback_data="my_requests")],
     ])
 
@@ -131,6 +139,36 @@ def requisites(row):
     return f"🪙 CryptoBot\n└ {row['payout_value']}"
 
 
+def get_stats(uid):
+    """Возвращает (заработано, выведено, в обработке, баланс)"""
+    approved_refs = cur.execute(
+        "SELECT COUNT(*) c FROM referrals WHERE worker_id = ? AND status = 'approved'",
+        (uid,)
+    ).fetchone()["c"]
+    earned = approved_refs * REWARD
+
+    paid = cur.execute(
+        "SELECT COALESCE(SUM(amount_num), 0) s FROM withdrawals "
+        "WHERE worker_id = ? AND status = 'approved'",
+        (uid,)
+    ).fetchone()["s"]
+
+    pending = cur.execute(
+        "SELECT COALESCE(SUM(amount_num), 0) s FROM withdrawals "
+        "WHERE worker_id = ? AND status = 'new'",
+        (uid,)
+    ).fetchone()["s"]
+
+    balance = earned - paid - pending
+    return earned, paid, pending, balance
+
+
+def parse_amount(text: str) -> int:
+    """Вытаскивает число из строки типа '5000 ₽' или '50 USDT'."""
+    digits = re.sub(r"\D", "", text or "")
+    return int(digits) if digits else 0
+
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -138,14 +176,19 @@ dp = Dispatcher()
 @dp.message(Command("start"))
 async def start(message: Message):
     cur.execute(
-        "INSERT OR IGNORE INTO users (tg_id, name) VALUES (?, ?)",
-        (message.from_user.id, message.from_user.full_name)
+        "INSERT OR IGNORE INTO users (tg_id, name, username) VALUES (?, ?, ?)",
+        (message.from_user.id, message.from_user.full_name, message.from_user.username)
+    )
+    cur.execute(
+        "UPDATE users SET name = ?, username = ? WHERE tg_id = ?",
+        (message.from_user.full_name, message.from_user.username, message.from_user.id)
     )
     conn.commit()
     await message.answer(
         "👋 Добро пожаловать!\n\n"
         "Этот бот поможет подавать заявки на приведённых клиентов "
         "и запрашивать выплаты.\n\n"
+        f"💰 За каждого одобренного клиента: <b>{REWARD} ₽</b>\n\n"
         "Выберите действие 👇",
         reply_markup=main_menu()
     )
@@ -169,6 +212,45 @@ async def cancel_cb(call: CallbackQuery, state: FSMContext):
         reply_markup=main_menu()
     )
     await call.answer("Отменено")
+
+
+# --- Профиль ---
+
+@dp.callback_query(F.data == "profile")
+async def profile(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    uid = call.from_user.id
+    user = get_user(uid)
+    earned, paid, pending, balance = get_stats(uid)
+
+    nick = (user["username"] and f"@{user['username']}") or user["name"] or "—"
+
+    approved_count = cur.execute(
+        "SELECT COUNT(*) c FROM referrals WHERE worker_id = ? AND status = 'approved'",
+        (uid,)
+    ).fetchone()["c"]
+    total_count = cur.execute(
+        "SELECT COUNT(*) c FROM referrals WHERE worker_id = ?",
+        (uid,)
+    ).fetchone()["c"]
+
+    text = (
+        "👤 <b>Профиль</b>\n"
+        "━━━━━━━━━━━━━━━\n\n"
+        f"🆔 Ник: <b>{nick}</b>\n"
+        f"💰 За клиента: <b>{REWARD} ₽</b>\n\n"
+        f"📊 Всего заявок: <b>{total_count}</b>\n"
+        f"✅ Одобрено: <b>{approved_count}</b>\n\n"
+        "━━━━━━━━━━━━━━━\n"
+        f"💵 Заработано: <b>{earned} ₽</b>\n"
+        f"📤 Выведено: <b>{paid} ₽</b>\n"
+        f"⏳ В обработке: <b>{pending} ₽</b>\n"
+        "━━━━━━━━━━━━━━━\n"
+        f"🟢 Доступно к выводу: <b>{balance} ₽</b>"
+    )
+
+    await call.message.edit_text(text, reply_markup=main_menu())
+    await call.answer()
 
 
 # --- Заявка на клиента ---
@@ -229,11 +311,11 @@ async def ref_bank(message: Message, state: FSMContext):
         f"👤 ФИО: {data['fio']}\n"
         f"📱 Телефон: {data['phone']}\n"
         f"🏦 Банк: {bank or '—'}\n\n"
-        f"Статус: на проверке",
+        f"Статус: на проверке\n"
+        f"💰 Вознаграждение: {REWARD} ₽ после одобрения",
         reply_markup=back_kb()
     )
 
-    # уведомление админу с кнопками
     await bot.send_message(
         ADMIN_ID,
         f"📥 Новая заявка #{rid}\n\n"
@@ -333,12 +415,26 @@ async def withdraw_start(call: CallbackQuery, state: FSMContext):
         )
         await call.answer()
         return
+
+    earned, paid, pending, balance = get_stats(call.from_user.id)
+
+    if balance <= 0:
+        await call.message.edit_text(
+            "💰 Заявка на вывод\n━━━━━━━━━━━━━━━\n\n"
+            f"🟢 Доступно к выводу: <b>{balance} ₽</b>\n\n"
+            "Пока нечего выводить. Приведите клиентов и дождитесь одобрения заявок.",
+            reply_markup=main_menu()
+        )
+        await call.answer()
+        return
+
     await state.set_state(WithdrawForm.amount)
     await call.message.edit_text(
         "💰 Заявка на вывод\n━━━━━━━━━━━━━━━\n\n"
         f"Ваши реквизиты:\n{requisites(user)}\n\n"
-        "Укажите сумму к выводу:\n"
-        "Например: 5000 ₽ или 50 USDT",
+        f"🟢 Доступно к выводу: <b>{balance} ₽</b>\n\n"
+        "Укажите сумму к выводу (в рублях):\n"
+        f"Например: {balance}",
         reply_markup=cancel_kb()
     )
     await call.answer()
@@ -346,12 +442,30 @@ async def withdraw_start(call: CallbackQuery, state: FSMContext):
 
 @dp.message(WithdrawForm.amount)
 async def withdraw_amount(message: Message, state: FSMContext):
-    amount = message.text.strip()
+    text = message.text.strip()
+    amount_num = parse_amount(text)
     user = get_user(message.from_user.id)
+    earned, paid, pending, balance = get_stats(message.from_user.id)
+
+    if amount_num <= 0:
+        return await message.answer(
+            "❌ Не понял сумму. Введите число, например: 700",
+            reply_markup=cancel_kb()
+        )
+
+    if amount_num > balance:
+        return await message.answer(
+            f"❌ Сумма больше доступного.\n"
+            f"🟢 Доступно: <b>{balance} ₽</b>\n\n"
+            "Введите сумму меньше или равную балансу:",
+            reply_markup=cancel_kb()
+        )
+
     cur.execute(
-        "INSERT INTO withdrawals (worker_id, amount, payout_type, payout_value, created_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (message.from_user.id, amount, user["payout_type"], user["payout_value"],
+        "INSERT INTO withdrawals (worker_id, amount, amount_num, payout_type, "
+        "payout_value, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (message.from_user.id, f"{amount_num} ₽", amount_num,
+         user["payout_type"], user["payout_value"],
          datetime.now().strftime("%d.%m.%Y %H:%M"))
     )
     conn.commit()
@@ -360,7 +474,7 @@ async def withdraw_amount(message: Message, state: FSMContext):
 
     await message.answer(
         f"✅ Заявка на вывод #{wid} отправлена!\n━━━━━━━━━━━━━━━\n\n"
-        f"💵 Сумма: {amount}\n{requisites(user)}\n\n"
+        f"💵 Сумма: <b>{amount_num} ₽</b>\n{requisites(user)}\n\n"
         f"Статус: на обработке",
         reply_markup=back_kb()
     )
@@ -369,7 +483,7 @@ async def withdraw_amount(message: Message, state: FSMContext):
         ADMIN_ID,
         f"💸 Заявка на вывод #{wid}\n\n"
         f"👨‍💼 {message.from_user.full_name} (id: {message.from_user.id})\n"
-        f"💵 Сумма: {amount}\n{requisites(user)}",
+        f"💵 Сумма: {amount_num} ₽\n{requisites(user)}",
         reply_markup=decision_kb("wd", wid, message.from_user.id)
     )
 
@@ -417,7 +531,7 @@ async def my_requests(call: CallbackQuery, state: FSMContext):
     else:
         parts.append("пока нет")
 
-    await call.message.edit_text("\n".join(parts), reply_markup=back_kb())
+    await call.message.edit_text("\n".join(parts), reply_markup=main_menu())
     await call.answer()
 
 
@@ -439,12 +553,12 @@ async def admin_decision(call: CallbackQuery):
     cur.execute(f"UPDATE {table} SET status = ? WHERE id = ?", (status, item_id))
     conn.commit()
 
-    # уведомляем сотрудника
     if kind == "ref":
         if approved:
             worker_text = (
                 f"✅ Заявка #{item_id} одобрена!\n\n"
-                f"Клиент принят в работу. Спасибо!"
+                f"💰 Начислено: +{REWARD} ₽\n"
+                f"Проверить баланс: 👤 Профиль"
             )
         else:
             worker_text = (
@@ -455,7 +569,7 @@ async def admin_decision(call: CallbackQuery):
         if approved:
             worker_text = (
                 f"✅ Заявка на вывод #{item_id} одобрена!\n\n"
-                f"Выплата будет произведена в ближайшее время."
+                f"💵 Выплата произведена. Проверить баланс: 👤 Профиль"
             )
         else:
             worker_text = (
@@ -468,7 +582,6 @@ async def admin_decision(call: CallbackQuery):
     except Exception:
         pass
 
-    # обновляем сообщение у админа — убираем кнопки, добавляем статус
     new_text = (call.message.html_text or call.message.text) + (
         "\n\n✅ <b>ОДОБРЕНО</b>" if approved else "\n\n❌ <b>ОТКЛОНЕНО</b>"
     )
