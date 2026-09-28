@@ -5,6 +5,7 @@ import sqlite3
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -12,12 +13,12 @@ from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 )
 
-BOT_TOKEN = "8805214954:AAHEkkq4TEAuu457JtNq1eO0CE9cw0gqxk0"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("Укажите BOT_TOKEN")
 
 ADMIN_ID = 7891556528  # ваш ID
-REWARD = 700           # сколько рублей за одну одобренную заявку
+REWARD = 700           # рублей за одного одобренного клиента
 
 conn = sqlite3.connect("bot.db", check_same_thread=False)
 conn.row_factory = sqlite3.Row
@@ -55,7 +56,6 @@ def init_db():
     """)
     conn.commit()
 
-    # добавляем колонки для старых баз
     for stmt in (
         "ALTER TABLE users ADD COLUMN username TEXT",
         "ALTER TABLE withdrawals ADD COLUMN amount_num INTEGER DEFAULT 0",
@@ -140,7 +140,6 @@ def requisites(row):
 
 
 def get_stats(uid):
-    """Возвращает (заработано, выведено, в обработке, баланс)"""
     approved_refs = cur.execute(
         "SELECT COUNT(*) c FROM referrals WHERE worker_id = ? AND status = 'approved'",
         (uid,)
@@ -164,12 +163,14 @@ def get_stats(uid):
 
 
 def parse_amount(text: str) -> int:
-    """Вытаскивает число из строки типа '5000 ₽' или '50 USDT'."""
     digits = re.sub(r"\D", "", text or "")
     return int(digits) if digits else 0
 
 
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode="HTML")
+)
 dp = Dispatcher()
 
 
@@ -185,7 +186,7 @@ async def start(message: Message):
     )
     conn.commit()
     await message.answer(
-        "👋 Добро пожаловать!\n\n"
+        "👋 <b>Добро пожаловать!</b>\n\n"
         "Этот бот поможет подавать заявки на приведённых клиентов "
         "и запрашивать выплаты.\n\n"
         f"💰 За каждого одобренного клиента: <b>{REWARD} ₽</b>\n\n"
@@ -198,7 +199,7 @@ async def start(message: Message):
 async def menu_cb(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await call.message.edit_text(
-        "🏠 Главное меню\n\nВыберите действие 👇",
+        "🏠 <b>Главное меню</b>\n\nВыберите действие 👇",
         reply_markup=main_menu()
     )
     await call.answer()
@@ -208,7 +209,7 @@ async def menu_cb(call: CallbackQuery, state: FSMContext):
 async def cancel_cb(call: CallbackQuery, state: FSMContext):
     await state.clear()
     await call.message.edit_text(
-        "🏠 Главное меню\n\nВыберите действие 👇",
+        "🏠 <b>Главное меню</b>\n\nВыберите действие 👇",
         reply_markup=main_menu()
     )
     await call.answer("Отменено")
@@ -259,8 +260,8 @@ async def profile(call: CallbackQuery, state: FSMContext):
 async def ref_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(ReferralForm.fio)
     await call.message.edit_text(
-        "📝 Новая заявка на клиента\n━━━━━━━━━━━━━━━\n\n"
-        "Шаг 1 из 3\n\nВведите ФИО приведённого клиента:",
+        "📝 <b>Новая заявка на клиента</b>\n━━━━━━━━━━━━━━━\n\n"
+        "<b>Шаг 1 из 3</b>\n\nВведите <b>ФИО</b> приведённого клиента:",
         reply_markup=cancel_kb()
     )
     await call.answer()
@@ -271,8 +272,8 @@ async def ref_fio(message: Message, state: FSMContext):
     await state.update_data(fio=message.text.strip())
     await state.set_state(ReferralForm.phone)
     await message.answer(
-        "📝 Новая заявка на клиента\n━━━━━━━━━━━━━━━\n\n"
-        "Шаг 2 из 3\n\nВведите номер телефона клиента:\n"
+        "📝 <b>Новая заявка на клиента</b>\n━━━━━━━━━━━━━━━\n\n"
+        "<b>Шаг 2 из 3</b>\n\nВведите <b>номер телефона</b> клиента:\n"
         "Например: +7 900 123-45-67",
         reply_markup=cancel_kb()
     )
@@ -283,8 +284,8 @@ async def ref_phone(message: Message, state: FSMContext):
     await state.update_data(phone=message.text.strip())
     await state.set_state(ReferralForm.bank)
     await message.answer(
-        "📝 Новая заявка на клиента\n━━━━━━━━━━━━━━━\n\n"
-        "Шаг 3 из 3\n\nУкажите банк / отделение\n"
+        "📝 <b>Новая заявка на клиента</b>\n━━━━━━━━━━━━━━━\n\n"
+        "<b>Шаг 3 из 3</b>\n\nУкажите <b>банк / отделение</b>\n"
         "или отправьте «-», чтобы пропустить",
         reply_markup=cancel_kb()
     )
@@ -307,18 +308,18 @@ async def ref_bank(message: Message, state: FSMContext):
     await state.clear()
 
     await message.answer(
-        f"✅ Заявка #{rid} отправлена!\n━━━━━━━━━━━━━━━\n\n"
-        f"👤 ФИО: {data['fio']}\n"
-        f"📱 Телефон: {data['phone']}\n"
-        f"🏦 Банк: {bank or '—'}\n\n"
+        f"✅ <b>Заявка #{rid} отправлена!</b>\n━━━━━━━━━━━━━━━\n\n"
+        f"👤 ФИО: <b>{data['fio']}</b>\n"
+        f"📱 Телефон: <b>{data['phone']}</b>\n"
+        f"🏦 Банк: <b>{bank or '—'}</b>\n\n"
         f"Статус: на проверке\n"
-        f"💰 Вознаграждение: {REWARD} ₽ после одобрения",
+        f"💰 Вознаграждение: <b>{REWARD} ₽</b> после одобрения",
         reply_markup=back_kb()
     )
 
     await bot.send_message(
         ADMIN_ID,
-        f"📥 Новая заявка #{rid}\n\n"
+        f"📥 <b>Новая заявка #{rid}</b>\n\n"
         f"👤 {data['fio']}\n"
         f"📱 {data['phone']}\n"
         f"🏦 {bank or '—'}\n"
@@ -335,12 +336,12 @@ async def payout_info(call: CallbackQuery, state: FSMContext):
     user = get_user(call.from_user.id)
     if user and user["payout_type"]:
         text = (
-            "💳 Мои реквизиты\n━━━━━━━━━━━━━━━\n\n"
+            "💳 <b>Мои реквизиты</b>\n━━━━━━━━━━━━━━━\n\n"
             f"{requisites(user)}\n\nХотите изменить?"
         )
     else:
         text = (
-            "💳 Реквизиты для выплат\n━━━━━━━━━━━━━━━\n\n"
+            "💳 <b>Реквизиты для выплат</b>\n━━━━━━━━━━━━━━━\n\n"
             "❌ У вас ещё не заполнены реквизиты.\n\n"
             "Выберите способ получения выплаты 👇"
         )
@@ -354,16 +355,16 @@ async def payout_choose(call: CallbackQuery, state: FSMContext):
     if method == "sbp":
         await state.set_state(PayoutForm.sbp)
         await call.message.edit_text(
-            "📱 СБП\n━━━━━━━━━━━━━━━\n\n"
-            "Введите номер телефона, привязанный к СБП:\n"
+            "📱 <b>СБП</b>\n━━━━━━━━━━━━━━━\n\n"
+            "Введите <b>номер телефона</b>, привязанный к СБП:\n"
             "Например: +7 900 123-45-67",
             reply_markup=cancel_kb()
         )
     else:
         await state.set_state(PayoutForm.crypto)
         await call.message.edit_text(
-            "🪙 CryptoBot\n━━━━━━━━━━━━━━━\n\n"
-            "Введите ваш @username в Telegram или адрес кошелька USDT:\n"
+            "🪙 <b>CryptoBot</b>\n━━━━━━━━━━━━━━━\n\n"
+            "Введите ваш <b>@username</b> в Telegram или <b>адрес кошелька USDT</b>:\n"
             "Например: @ivanov или TRC20-адрес",
             reply_markup=cancel_kb()
         )
@@ -380,7 +381,7 @@ async def save_sbp(message: Message, state: FSMContext):
     conn.commit()
     await state.clear()
     await message.answer(
-        f"✅ Реквизиты сохранены\n━━━━━━━━━━━━━━━\n\n📱 СБП\n└ {value}",
+        f"✅ <b>Реквизиты сохранены</b>\n━━━━━━━━━━━━━━━\n\n📱 СБП\n└ <code>{value}</code>",
         reply_markup=back_kb()
     )
 
@@ -395,7 +396,7 @@ async def save_crypto(message: Message, state: FSMContext):
     conn.commit()
     await state.clear()
     await message.answer(
-        f"✅ Реквизиты сохранены\n━━━━━━━━━━━━━━━\n\n🪙 CryptoBot\n└ {value}",
+        f"✅ <b>Реквизиты сохранены</b>\n━━━━━━━━━━━━━━━\n\n🪙 CryptoBot\n└ <code>{value}</code>",
         reply_markup=back_kb()
     )
 
@@ -408,7 +409,7 @@ async def withdraw_start(call: CallbackQuery, state: FSMContext):
     user = get_user(call.from_user.id)
     if not user or not user["payout_type"]:
         await call.message.edit_text(
-            "⚠️ Реквизиты не заполнены\n━━━━━━━━━━━━━━━\n\n"
+            "⚠️ <b>Реквизиты не заполнены</b>\n━━━━━━━━━━━━━━━\n\n"
             "Чтобы подать заявку на вывод, сначала заполните данные для выплаты.\n\n"
             "Выберите способ 👇",
             reply_markup=payout_kb()
@@ -420,7 +421,7 @@ async def withdraw_start(call: CallbackQuery, state: FSMContext):
 
     if balance <= 0:
         await call.message.edit_text(
-            "💰 Заявка на вывод\n━━━━━━━━━━━━━━━\n\n"
+            "💰 <b>Заявка на вывод</b>\n━━━━━━━━━━━━━━━\n\n"
             f"🟢 Доступно к выводу: <b>{balance} ₽</b>\n\n"
             "Пока нечего выводить. Приведите клиентов и дождитесь одобрения заявок.",
             reply_markup=main_menu()
@@ -430,7 +431,7 @@ async def withdraw_start(call: CallbackQuery, state: FSMContext):
 
     await state.set_state(WithdrawForm.amount)
     await call.message.edit_text(
-        "💰 Заявка на вывод\n━━━━━━━━━━━━━━━\n\n"
+        "💰 <b>Заявка на вывод</b>\n━━━━━━━━━━━━━━━\n\n"
         f"Ваши реквизиты:\n{requisites(user)}\n\n"
         f"🟢 Доступно к выводу: <b>{balance} ₽</b>\n\n"
         "Укажите сумму к выводу (в рублях):\n"
@@ -473,7 +474,7 @@ async def withdraw_amount(message: Message, state: FSMContext):
     await state.clear()
 
     await message.answer(
-        f"✅ Заявка на вывод #{wid} отправлена!\n━━━━━━━━━━━━━━━\n\n"
+        f"✅ <b>Заявка на вывод #{wid} отправлена!</b>\n━━━━━━━━━━━━━━━\n\n"
         f"💵 Сумма: <b>{amount_num} ₽</b>\n{requisites(user)}\n\n"
         f"Статус: на обработке",
         reply_markup=back_kb()
@@ -481,9 +482,9 @@ async def withdraw_amount(message: Message, state: FSMContext):
 
     await bot.send_message(
         ADMIN_ID,
-        f"💸 Заявка на вывод #{wid}\n\n"
+        f"💸 <b>Заявка на вывод #{wid}</b>\n\n"
         f"👨‍💼 {message.from_user.full_name} (id: {message.from_user.id})\n"
-        f"💵 Сумма: {amount_num} ₽\n{requisites(user)}",
+        f"💵 Сумма: <b>{amount_num} ₽</b>\n{requisites(user)}",
         reply_markup=decision_kb("wd", wid, message.from_user.id)
     )
 
@@ -509,7 +510,7 @@ async def my_requests(call: CallbackQuery, state: FSMContext):
         "rejected": "❌ отклонена",
     }
 
-    parts = ["📋 Мои заявки\n━━━━━━━━━━━━━━━\n", "Клиенты:"]
+    parts = ["📋 <b>Мои заявки</b>\n━━━━━━━━━━━━━━━\n", "<b>Клиенты:</b>"]
     if refs:
         for r in refs:
             parts.append(
@@ -518,9 +519,9 @@ async def my_requests(call: CallbackQuery, state: FSMContext):
                 f"└ {status_names.get(r['status'], '🕓 на проверке')}"
             )
     else:
-        parts.append("пока нет")
+        parts.append("<i>пока нет</i>")
 
-    parts.append("\nВыводы:")
+    parts.append("\n<b>Выводы:</b>")
     if wds:
         for w in wds:
             parts.append(
@@ -529,7 +530,7 @@ async def my_requests(call: CallbackQuery, state: FSMContext):
                 f"└ {status_names.get(w['status'], '🕓 на проверке')}"
             )
     else:
-        parts.append("пока нет")
+        parts.append("<i>пока нет</i>")
 
     await call.message.edit_text("\n".join(parts), reply_markup=main_menu())
     await call.answer()
@@ -556,24 +557,24 @@ async def admin_decision(call: CallbackQuery):
     if kind == "ref":
         if approved:
             worker_text = (
-                f"✅ Заявка #{item_id} одобрена!\n\n"
-                f"💰 Начислено: +{REWARD} ₽\n"
+                f"✅ <b>Заявка #{item_id} одобрена!</b>\n\n"
+                f"💰 Начислено: <b>+{REWARD} ₽</b>\n"
                 f"Проверить баланс: 👤 Профиль"
             )
         else:
             worker_text = (
-                f"❌ Заявка #{item_id} отклонена.\n\n"
+                f"❌ <b>Заявка #{item_id} отклонена.</b>\n\n"
                 f"Если считаете это ошибкой — свяжитесь с администратором."
             )
     else:
         if approved:
             worker_text = (
-                f"✅ Заявка на вывод #{item_id} одобрена!\n\n"
+                f"✅ <b>Заявка на вывод #{item_id} одобрена!</b>\n\n"
                 f"💵 Выплата произведена. Проверить баланс: 👤 Профиль"
             )
         else:
             worker_text = (
-                f"❌ Заявка на вывод #{item_id} отклонена.\n\n"
+                f"❌ <b>Заявка на вывод #{item_id} отклонена.</b>\n\n"
                 f"Свяжитесь с администратором для уточнения."
             )
 
