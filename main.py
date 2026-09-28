@@ -13,7 +13,7 @@ from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 )
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = "8805214954:AAHEkkq4TEAuu457JtNq1eO0CE9cw0gqxk0"
 if not BOT_TOKEN:
     raise RuntimeError("Укажите BOT_TOKEN")
 
